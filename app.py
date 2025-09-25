@@ -1,23 +1,23 @@
-
 import streamlit as st
 import pandas as pd
-import io, re
+import re
 from io import BytesIO
 
-st.set_page_config(page_title="TD Checker", page_icon="✅", layout="wide")
+# ---------- Page config ----------
+st.set_page_config(page_title="TD Checker v3 (Manual)", page_icon="✅", layout="wide")
+st.title("TD Checker v3 • เปรียบเทียบ berth_id ด้วยรายการอ้างอิงที่วางเอง (Manual paste)")
+st.caption("อัปโหลดไฟล์ .dna (หลายไฟล์ได้) + กำหนด td_id และวางลิสต์ berth_id ต่อ td แล้วกดสร้างรายงาน")
 
-st.title("TD Checker • เปรียบเทียบ berth_id ระหว่างไฟล์ .dna และไฟล์อ้างอิง")
-st.markdown("""
-อัปโหลดไฟล์ .dna (ได้สูงสุด 3 ไฟล์) และไฟล์อ้างอิง (.txt) แล้วเลือก td_id (เช่น **Y1, YE, FE, DR**) เพื่อสร้างรายงานอัตโนมัติ
-""")
-
+# ---------- Helpers ----------
 def parse_dna_file(file) -> pd.DataFrame:
+    """อ่านไฟล์ .dna แล้วดึงคู่ (berth_id, td_id) ออกมา"""
     content = file.read()
     try:
         text = content.decode("utf-8", errors="ignore")
-    except:
+    except Exception:
         text = content.decode(errors="ignore")
     lines = text.splitlines()
+
     in_data = False
     rows = []
     for raw in lines:
@@ -31,55 +31,74 @@ def parse_dna_file(file) -> pd.DataFrame:
             continue
         if s.startswith("Version") or s.startswith("berth_id"):
             continue
-        toks = [t.strip() for t in raw.split('\t') if t.strip() != ""]
+
+        # สมมติว่าคั่นด้วยแท็บ (บางไฟล์มีช่องว่างปน)
+        toks = [t.strip() for t in raw.split("\t") if t.strip() != ""]
         if not toks:
             continue
+
         berth_id = toks[0]
         td_id    = toks[-1]
-        if berth_id.startswith("//"):
+
+        if str(berth_id).startswith("//"):  # ข้ามคอมเมนต์
             continue
-        rows.append((berth_id.strip(), td_id.strip()))
+
+        rows.append((str(berth_id).strip(), str(td_id).strip()))
+
     df = pd.DataFrame(rows, columns=["berth_id", "td_id"])
     return df
 
-def load_reference_ids(txt_file) -> set:
-    content = txt_file.read()
-    try:
-        text = content.decode("utf-8", errors="ignore")
-    except:
-        text = content.decode(errors="ignore")
-    tokens = re.split(r"[,\s]+", text.strip())
+
+def parse_manual_list(text: str) -> set:
+    """รับข้อความที่คั่นด้วย space/comma/newline แล้วแปลงเป็นเซ็ตของรหัส"""
+    tokens = re.split(r"[,\s]+", (text or "").strip())
     return {t for t in tokens if t}
 
+
 def compare_sets(name: str, dna_set: set, ref_set: set) -> pd.DataFrame:
-    missing = sorted(ref_set - dna_set)  # อยู่ในสเปก แต่ไม่อยู่ใน .dna
-    extra   = sorted(dna_set - ref_set)  # อยู่ใน .dna แต่ไม่อยู่ในสเปก
+    """คืน DataFrame ที่มี status = MISSING_IN_DNA / EXTRA_IN_DNA / MATCHED"""
+    missing = sorted(ref_set - dna_set)  # อยู่ในอ้างอิง แต่ไม่อยู่ใน .dna
+    extra   = sorted(dna_set - ref_set)  # อยู่ใน .dna แต่ไม่อยู่ในอ้างอิง
     matched = sorted(dna_set & ref_set)
+
     parts = []
     parts += [{"td_id": name, "status": "MISSING_IN_DNA", "berth_id": bid} for bid in missing]
     parts += [{"td_id": name, "status": "EXTRA_IN_DNA",   "berth_id": bid} for bid in extra]
     parts += [{"td_id": name, "status": "MATCHED",        "berth_id": bid} for bid in matched]
     return pd.DataFrame(parts, columns=["td_id", "status", "berth_id"])
 
-dna_files = st.file_uploader("อัปโหลดไฟล์ .dna (1–3 ไฟล์)", type=["dna","txt"], accept_multiple_files=True)
-ref_files = st.file_uploader("อัปโหลดไฟล์อ้างอิง (.txt) เช่น Y1.txt, YE.txt ... (อัปโหลดหลายไฟล์ได้)", type=["txt"], accept_multiple_files=True)
+
+# ---------- Inputs ----------
+dna_files = st.file_uploader("อัปโหลดไฟล์ .dna (1–3 ไฟล์)", type=["dna", "txt"], accept_multiple_files=True)
 
 td_input = st.text_input("ใส่รายการ td_id (คั่นด้วยช่องว่าง)", value="Y1 YE FE DR").strip()
 td_list = [t for t in td_input.split() if t]
 
+st.markdown("### วางรายการอ้างอิงของแต่ละ td (คั่นด้วย space / comma / newline)")
+manual_map = {}
+cols = st.columns(2)
+for i, td in enumerate(td_list):
+    with cols[i % 2]:
+        manual_map[td] = st.text_area(
+            f"{td} • วาง `berth_id` ที่เป็นสเปก",
+            key=f"ta_{td}",
+            height=120,
+            placeholder="ตัวอย่าง: A101, A102, A103 หรือพิมพ์เรียงกันเว้นวรรค/บรรทัด"
+        )
+
 run_btn = st.button("🔎 สร้างรายงาน")
 
+# ---------- Processing ----------
 if run_btn:
     if not dna_files:
         st.error("กรุณาอัปโหลดไฟล์ .dna อย่างน้อย 1 ไฟล์")
         st.stop()
 
-    # รวมข้อมูลจากไฟล์ .dna
+    # รวมข้อมูลจากทุกไฟล์ .dna
     frames = []
     for f in dna_files:
         try:
-            df = parse_dna_file(f)
-            frames.append(df)
+            frames.append(parse_dna_file(f))
         except Exception as e:
             st.error(f"อ่านไฟล์ล้มเหลว: {f.name} ({e})")
     if not frames:
@@ -88,41 +107,25 @@ if run_btn:
 
     df_all = pd.concat(frames, ignore_index=True)
 
-    # สร้าง mapping td -> ref_set จากไฟล์อ้างอิง
-    ref_map = {t: set() for t in td_list}
-    # เดา td จากชื่อไฟล์อ้างอิง: เช่น Y1.txt -> Y1
-    name_map = {}
-    for rf in ref_files or []:
-        stem = rf.name.rsplit(".",1)[0]
-        name_map[stem] = rf
-
-    for td in td_list:
-        if td in name_map:
-            try:
-                # ต้องอ่านสำเนาไฟล์ (file_uploader เป็น stream, ใช้ครั้งเดียว)
-                ref_bytes = name_map[td].getvalue()
-                ref_buf = io.BytesIO(ref_bytes)
-                ref_map[td] = load_reference_ids(ref_buf)
-            except Exception as e:
-                st.warning(f"อ่านไฟล์อ้างอิง {name_map[td].name} ไม่ได้: {e}")
-                ref_map[td] = set()
-        else:
-            ref_map[td] = set()  # ไม่อัปโหลดไฟล์ให้ td นี้ จะเทียบเฉพาะรายการที่พบใน .dna
-
-    # จัดทำผลลัพธ์
+    # เตรียมเปรียบเทียบ
     summary_rows = []
     per_td_results = {}
+    warn_empty = []
+
     for td in td_list:
         dna_ids = set(df_all.loc[df_all["td_id"] == td, "berth_id"].astype(str))
-        ref_ids = ref_map.get(td, set()) or set()
-        # ถ้าไม่มีไฟล์อ้างอิง ให้ถือว่า ref = dna (เพื่อให้เห็นรายการทั้งหมดอย่างน้อย)
+        ref_ids = parse_manual_list(manual_map.get(td, ""))
+
         if len(ref_ids) == 0:
-            ref_ids = dna_ids.copy()
+            warn_empty.append(td)
+
         result_df = compare_sets(td, dna_ids, ref_ids)
         per_td_results[td] = result_df
-        n_miss = (result_df["status"] == "MISSING_IN_DNA").sum()
+
+        n_miss  = (result_df["status"] == "MISSING_IN_DNA").sum()
         n_extra = (result_df["status"] == "EXTRA_IN_DNA").sum()
         n_match = (result_df["status"] == "MATCHED").sum()
+
         summary_rows.append({
             "td_id": td,
             "ref_count": len(ref_ids),
@@ -132,9 +135,29 @@ if run_btn:
             "extra_in_dna": n_extra
         })
 
+    if warn_empty:
+        st.warning("td ต่อไปนี้ยังไม่ได้วางรายการอ้างอิง: " + ", ".join(warn_empty))
+
     summary = pd.DataFrame(summary_rows)
     st.subheader("📊 SUMMARY")
     st.dataframe(summary, use_container_width=True)
+
+    # แสดงผลต่างแบบทันที
+    st.subheader("🔎 รายการที่แตกต่าง (ต่อ td_id)")
+    for td, dfres in per_td_results.items():
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown(f"**{td} — MISSING_IN_DNA** (อยู่ในอ้างอิง แต่ไม่อยู่ใน .dna)")
+            st.dataframe(
+                dfres.loc[dfres["status"] == "MISSING_IN_DNA", ["berth_id"]],
+                use_container_width=True, height=240
+            )
+        with col2:
+            st.markdown(f"**{td} — EXTRA_IN_DNA** (อยู่ใน .dna แต่ไม่อยู่ในอ้างอิง)")
+            st.dataframe(
+                dfres.loc[dfres["status"] == "EXTRA_IN_DNA", ["berth_id"]],
+                use_container_width=True, height=240
+            )
 
     # สร้างไฟล์ Excel ให้ดาวน์โหลด
     output = BytesIO()
@@ -144,6 +167,7 @@ if run_btn:
             sheet = td[:31] if td else "TD"
             dfres.to_excel(writer, sheet_name=sheet, index=False)
     output.seek(0)
+
     st.download_button(
         label="⬇️ ดาวน์โหลดรายงาน Excel",
         data=output,
@@ -152,4 +176,4 @@ if run_btn:
     )
 
     st.success("สร้างรายงานสำเร็จ")
-    st.caption("Tip: ถ้าต้องการให้ทีมงานใช้งานง่าย ให้เตรียมไฟล์อ้างอิงชื่อ Y1.txt, YE.txt, FE.txt, DR.txt แล้วอัปโหลดคู่กับไฟล์ .dna")
+    st.caption("Tips: ถ้าต้องการให้ทีมใช้งานเร็ว ให้เตรียมลิสต์สเปกของแต่ละ td ไว้ล่วงหน้าแล้ว copy/paste ลงช่องของ td นั้น ๆ")

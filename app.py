@@ -10,7 +10,10 @@ st.caption("อัปโหลดไฟล์ .dna (หลายไฟล์ไ�
 
 # ---------- Helpers ----------
 def parse_dna_file(file) -> pd.DataFrame:
-    """อ่านไฟล์ .dna แล้วดึงคู่ (berth_id, td_id) ออกมา"""
+    """อ่านไฟล์ .dna แล้วดึงคู่ (berth_id, td_id) ออกมา
+    - ข้ามเฉพาะบรรทัดคอมเมนต์ที่ขึ้นต้นด้วย //
+    - รองรับคอมเมนต์ท้ายบรรทัด (inline comment) โดยตัดส่วนที่ตามหลัง // ออกก่อนแยกคอลัมน์
+    """
     content = file.read()
     try:
         text = content.decode("utf-8", errors="ignore")
@@ -22,25 +25,38 @@ def parse_dna_file(file) -> pd.DataFrame:
     rows = []
     for raw in lines:
         s = raw.strip()
+
+        # เริ่มอ่านหลังหัวข้อ DATA
         if s.startswith("** DATA BEGINS HERE **"):
             in_data = True
             continue
-        if not in_data:
+        if not in_data or not s:
             continue
-        if not s:
-            continue
+
+        # ข้ามหัวตาราง/ metadata
         if s.startswith("Version") or s.startswith("berth_id"):
             continue
 
-        # สมมติว่าคั่นด้วยแท็บ (บางไฟล์มีช่องว่างปน)
-        toks = [t.strip() for t in raw.split("\t") if t.strip() != ""]
+        # --- ข้ามเฉพาะคอมเมนต์ทั้งบรรทัด ---
+        if s.startswith("//"):
+            continue
+
+        # --- ตัดคอมเมนต์ท้ายบรรทัด (inline comment) ถ้ามี ---
+        cut = raw
+        pos = cut.find("//")
+        if pos > 0:  # มี // และไม่ได้อยู่ต้นบรรทัด
+            cut = cut[:pos]
+
+        # แยกคอลัมน์ (คั่นด้วยแท็บ/มีช่องว่างปน)
+        toks = [t.strip() for t in cut.split("\t") if t.strip() != ""]
         if not toks:
             continue
 
         berth_id = toks[0]
         td_id    = toks[-1]
 
-        if str(berth_id).startswith("//"):  # ข้ามคอมเมนต์
+        # ถ้า berth_id เป็นคอมเมนต์หลังการตัดแล้ว จะถูกข้ามอยู่ดี
+        if str(berth_id).startswith("//"):
             continue
 
         rows.append((str(berth_id).strip(), str(td_id).strip()))
@@ -69,7 +85,7 @@ def compare_sets(name: str, dna_set: set, ref_set: set) -> pd.DataFrame:
 
 
 # ---------- Inputs ----------
-dna_files = st.file_uploader("อัปโหลดไฟล์ .dna (1–3 ไฟล์)", type=["dna", "txt"], accept_multiple_files=True)
+dna_files = st.file_uploader("อัปโหลดไฟล์ .dna (ไม่จำกัดจำนวน)", type=["dna", "txt"], accept_multiple_files=True)
 
 td_input = st.text_input("ใส่รายการ td_id (คั่นด้วยช่องว่าง)", value="Y1 YE FE DR").strip()
 td_list = [t for t in td_input.split() if t]
@@ -87,6 +103,7 @@ for i, td in enumerate(td_list):
         )
 
 run_btn = st.button("🔎 สร้างรายงาน")
+
 
 # ---------- Processing ----------
 if run_btn:

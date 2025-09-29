@@ -94,6 +94,30 @@ def _back_to_home():
     st.rerun()
 
 
+def _prepare_td_files_from_uploads(dna_files, unique_only=True):
+    """Parse multiple .dna files and build a list of dicts: {td_id, file_name, data(bytes), count}"""
+    frames = []
+    for f in dna_files:
+        frames.append(parse_dna_file(f))
+    if not frames:
+        return []
+    df = pd.concat(frames, ignore_index=True)
+    if df.empty:
+        return []
+
+    td_files = []
+    for td, grp in df.groupby("td_id"):
+        values = grp["berth_id"].astype(str)
+        if unique_only:
+            values = pd.Index(values).unique()
+            values = sorted(values)
+        content = "\n".join(values) + ("\n" if len(values) else "")
+        data = content.encode("utf-8")
+        fname = f"{_sanitize_filename(str(td))}.txt"
+        td_files.append({"td_id": str(td), "file_name": fname, "data": data, "count": len(values)})
+    return sorted(td_files, key=lambda x: x["td_id"])
+
+
 # ============== HOMEPAGE ==============
 def render_home():
     st.title("DVS Tools • DCR Thailand")
@@ -138,7 +162,6 @@ def render_checker():
             st.error("กรุณาอัปโหลดไฟล์ .dna อย่างน้อย 1 ไฟล์")
             st.stop()
 
-        # รวมข้อมูลจากทุกไฟล์ .dna
         frames = []
         for f in dna_files:
             try:
@@ -151,7 +174,6 @@ def render_checker():
 
         df_all = pd.concat(frames, ignore_index=True)
 
-        # เตรียมเปรียบเทียบ
         summary_rows = []
         per_td_results = {}
         warn_empty = []
@@ -186,7 +208,6 @@ def render_checker():
         st.subheader("📊 SUMMARY")
         st.dataframe(summary, use_container_width=True)
 
-        # แสดงผลต่างแบบทันที
         st.subheader("🔎 รายการที่แตกต่าง (ต่อ td_id)")
         for td, dfres in per_td_results.items():
             col1, col2 = st.columns(2)
@@ -203,7 +224,6 @@ def render_checker():
                     use_container_width=True, height=240
                 )
 
-        # สร้างไฟล์ Excel ให้ดาวน์โหลด
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             summary.to_excel(writer, sheet_name="SUMMARY", index=False)
@@ -223,89 +243,79 @@ def render_checker():
         st.caption("Tips: เตรียมลิสต์สเปกของแต่ละ td ไว้ล่วงหน้าแล้ว copy/paste ลงช่องของ td นั้น ๆ")
 
 
-# ============== DVS PRODUCER (หลายไฟล์ + Checkbox เลือกไฟล์ + ZIP เดียว) ==============
+# ============== DVS PRODUCER (Persist results; Checkbox + one ZIP) ==============
 def render_producer():
     st.button("← กลับหน้าแรก", on_click=_back_to_home)
     st.title("DVS Producer")
 
     dna_files = st.file_uploader("อัปโหลดไฟล์ berth.dna (หลายไฟล์ได้)", type=["dna", "txt"], accept_multiple_files=True)
     unique_only = st.checkbox("ลบซ้ำและเรียงค่า (recommended)", value=True)
-    produce = st.button("🏁 Produce")
+    produce_clicked = st.button("🏁 Produce")
 
-    if produce:
+    # เมื่อกด Produce ให้เตรียมข้อมูลและเก็บไว้ใน session_state เพื่อไม่ให้หายตอน rerun
+    if produce_clicked:
         if not dna_files:
             st.error("กรุณาอัปโหลดไฟล์ .dna อย่างน้อย 1 ไฟล์")
             st.stop()
-
-        # รวมข้อมูลจากทุกไฟล์ .dna (ตัดคอมเมนต์ด้วย parse_dna_file)
-        frames = []
-        for f in dna_files:
-            try:
-                frames.append(parse_dna_file(f))
-            except Exception as e:
-                st.error(f"อ่านไฟล์ล้มเหลว: {f.name} ({e})")
-        if not frames:
-            st.error("ไม่พบข้อมูลในไฟล์ .dna ที่อัปโหลด")
+        try:
+            td_files = _prepare_td_files_from_uploads(dna_files, unique_only=unique_only)
+        except Exception as e:
+            st.error(f"ประมวลผลไม่สำเร็จ: {e}")
             st.stop()
 
-        df = pd.concat(frames, ignore_index=True)
-
-        if df.empty:
+        if not td_files:
             st.error("ไม่พบข้อมูลในไฟล์ .dna")
             st.stop()
 
-        # เตรียมข้อมูลต่อ td_id
-        td_files = []
-        for td, grp in df.groupby("td_id"):
-            values = grp["berth_id"].astype(str)
-            if unique_only:
-                values = pd.Index(values).unique()
-                values = sorted(values)
-            content = "\n".join(values) + ("\n" if len(values) else "")
-            data = content.encode("utf-8")
-            fname = f"{_sanitize_filename(str(td))}.txt"
-            td_files.append({"td_id": str(td), "file_name": fname, "data": data, "count": len(values)})
+        st.session_state["producer_td_files"] = td_files
+        # รีเซ็ตการเลือกทั้งหมดให้ว่าง
+        for it in td_files:
+            st.session_state[f"sel_{it['file_name']}"] = False
 
-        # แสดงสรุป
+    # หากมีผลลัพธ์ใน state ให้แสดงส่วนเลือกไฟล์ + ดาวน์โหลด เสมอ (ไม่หายเมื่อมี rerun จาก checkbox)
+    td_files_state = st.session_state.get("producer_td_files", [])
+    if td_files_state:
         st.subheader("📦 สรุปจำนวนรายการต่อ td_id")
-        st.dataframe(pd.DataFrame([{"td_id": x["td_id"], "count": x["count"]} for x in td_files]).sort_values("td_id").reset_index(drop=True), use_container_width=True)
+        st.dataframe(pd.DataFrame([{"td_id": x["td_id"], "count": x["count"]} for x in td_files_state]).sort_values("td_id").reset_index(drop=True), use_container_width=True)
 
-        # ======= UI แบบ Compact: Checkbox ต่อไฟล์ + ปุ่มเดียวโหลด ZIP =======
         st.subheader("🗂️ เลือกไฟล์ที่จะดาวน์โหลด")
-        # เตรียม state สำหรับ checkbox
-        keys = [f"sel_{item['file_name']}" for item in td_files]
-        for k in keys:
-            if k not in st.session_state:
-                st.session_state[k] = False
-
-        colA, colB, colC = st.columns([1,1,2])
-        with colA:
+        # ปุ่มเลือกทั้งหมด/ล้างเลือก
+        c1, c2, c3 = st.columns([1,1,2])
+        with c1:
             if st.button("เลือกทั้งหมด"):
-                for k in keys:
-                    st.session_state[k] = True
-                st.rerun()
-        with colB:
+                for it in td_files_state:
+                    st.session_state[f"sel_{it['file_name']}"] = True
+                st.experimental_rerun()
+        with c2:
             if st.button("ล้างการเลือก"):
-                for k in keys:
-                    st.session_state[k] = False
-                st.rerun()
+                for it in td_files_state:
+                    st.session_state[f"sel_{it['file_name']}"] = False
+                st.experimental_rerun()
+        with c3:
+            if st.button("ล้างผลลัพธ์ (เริ่มใหม่)"):
+                for it in td_files_state:
+                    st.session_state.pop(f"sel_{it['file_name']}", None)
+                st.session_state.pop("producer_td_files", None)
+                st.experimental_rerun()
 
-        # แสดง checkbox แบบ 2 คอลัมน์ ประหยัดพื้นที่
-        cols = st.columns(2)
-        for i, item in enumerate(sorted(td_files, key=lambda x: x["td_id"])):
-            with cols[i % 2]:
-                st.checkbox(f"{item['file_name']} ({item['count']} รายการ)", key=f"sel_{item['file_name']}")
+        # แสดง checkbox แบบ 3 คอลัมน์ เพื่อประหยัดพื้นที่
+        cols = st.columns(3)
+        for i, item in enumerate(td_files_state):
+            key = f"sel_{item['file_name']}"
+            if key not in st.session_state:
+                st.session_state[key] = False
+            with cols[i % 3]:
+                st.checkbox(f"{item['file_name']} ({item['count']})", key=key)
 
         # ปุ่มดาวน์โหลด ZIP จากไฟล์ที่เลือก
-        selected = [it for it in td_files if st.session_state.get(f"sel_{it['file_name']}", False)]
-        disabled = len(selected) == 0
-        zip_label = "⬇️ ดาวน์โหลดไฟล์ที่เลือก (ZIP)"
+        selected_items = [it for it in td_files_state if st.session_state.get(f"sel_{it['file_name']}", False)]
+        disabled = len(selected_items) == 0
         if disabled:
             st.info("กรุณาเลือกไฟล์อย่างน้อย 1 รายการ จากรายการด้านบน")
-        if st.button(zip_label, use_container_width=True, disabled=disabled):
+        if st.button("⬇️ ดาวน์โหลดไฟล์ที่เลือก (ZIP)", use_container_width=True, disabled=disabled):
             memzip = BytesIO()
             with zipfile.ZipFile(memzip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-                for it in selected:
+                for it in selected_items:
                     zf.writestr(it["file_name"], it["data"])
             memzip.seek(0)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")

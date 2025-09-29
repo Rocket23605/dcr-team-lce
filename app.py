@@ -3,7 +3,6 @@ import pandas as pd
 import re
 from io import BytesIO
 from datetime import datetime
-import zipfile
 
 # ============== PAGE CONFIG ==============
 st.set_page_config(page_title="DVS Tools", page_icon="🧭", layout="wide")
@@ -96,7 +95,7 @@ def _back_to_home():
 
 # ============== HOMEPAGE ==============
 def render_home():
-    st.title("DVS Tools • Homepage")
+    st.title("DVS Tools • DCR Thailand")
     st.write("เลือกเครื่องมือที่ต้องการใช้งาน")
 
     c1, c2 = st.columns(2)
@@ -109,17 +108,14 @@ def render_home():
             st.session_state.page = "checker"
             st.rerun()
 
-    st.caption("DVS Producer: อัปโหลดไฟล์ berth.dna แล้วระบบจะแยกเป็นไฟล์ .txt ต่อ td_id\n"
-               "DVS Checker: เทียบรายการ berth_id ตามสเปกของแต่ละ td (เหมือนแอปเดิม)")
-
 
 # ============== DVS CHECKER (ตามแอปเดิม) ==============
 def render_checker():
     st.button("← กลับหน้าแรก", on_click=_back_to_home)
-    st.title("DVS Checker • เปรียบเทียบ berth_id ด้วยรายการอ้างอิง (Manual paste)")
+    st.title("DVS Checker")
 
-    dna_files = st.file_uploader("อัปโหลดไฟล์ .dna (ไม่จำกัดจำนวน)", type=["dna", "txt"], accept_multiple_files=True)
-    td_input = st.text_input("ใส่รายการ td_id (คั่นด้วยช่องว่าง)", value="Y1 YE FE DR").strip()
+    dna_files = st.file_uploader("อัปโหลดไฟล์ berth.dna (หลายไฟล์ได้)", type=["dna", "txt"], accept_multiple_files=True)
+    td_input = st.text_input("ใส่รายการ td_id คั่นด้วยช่องว่าง จากนั้นกด Enter", value="Y1 YE FE DR").strip()
     td_list = [t for t in td_input.split() if t]
 
     st.markdown("### วางรายการอ้างอิงของแต่ละ td (คั่นด้วย space / comma / newline)")
@@ -226,59 +222,64 @@ def render_checker():
         st.caption("Tips: เตรียมลิสต์สเปกของแต่ละ td ไว้ล่วงหน้าแล้ว copy/paste ลงช่องของ td นั้น ๆ")
 
 
-# ============== DVS PRODUCER (แยกไฟล์ .txt ต่อ td_id) ==============
+# ============== DVS PRODUCER (หลายไฟล์ + ไม่รวม zip + ตัดคอมเมนต์) ==============
 def render_producer():
     st.button("← กลับหน้าแรก", on_click=_back_to_home)
-    st.title("DVS Producer • สร้างไฟล์ .txt ต่อ td_id จากไฟล์ berth.dna")
+    st.title("DVS Producer")
 
-    dna_file = st.file_uploader("อัปโหลดไฟล์ berth.dna", type=["dna", "txt"], accept_multiple_files=False)
+    dna_files = st.file_uploader("อัปโหลดไฟล์ berth.dna (หลายไฟล์ได้)", type=["dna", "txt"], accept_multiple_files=True)
     unique_only = st.checkbox("ลบซ้ำและเรียงค่า (recommended)", value=True)
     produce = st.button("🏁 Produce")
 
     if produce:
-        if dna_file is None:
-            st.error("กรุณาอัปโหลดไฟล์ .dna ก่อนกด Produce")
+        if not dna_files:
+            st.error("กรุณาอัปโหลดไฟล์ .dna อย่างน้อย 1 ไฟล์")
             st.stop()
 
-        # สร้าง DataFrame จากไฟล์เดียว
-        try:
-            df = parse_dna_file(dna_file)
-        except Exception as e:
-            st.error(f"อ่านไฟล์ล้มเหลว: {getattr(dna_file, 'name', 'berth.dna')} ({e})")
+        # รวมข้อมูลจากทุกไฟล์ .dna (ตัดคอมเมนต์ด้วย parse_dna_file)
+        frames = []
+        for f in dna_files:
+            try:
+                frames.append(parse_dna_file(f))
+            except Exception as e:
+                st.error(f"อ่านไฟล์ล้มเหลว: {f.name} ({e})")
+        if not frames:
+            st.error("ไม่พบข้อมูลในไฟล์ .dna ที่อัปโหลด")
             st.stop()
+
+        df = pd.concat(frames, ignore_index=True)
 
         if df.empty:
             st.error("ไม่พบข้อมูลในไฟล์ .dna")
             st.stop()
 
-        # จัดเตรียมไฟล์ .txt ต่อ td_id → รวมเป็น zip ให้ดาวน์โหลด
-        memzip = BytesIO()
-        with zipfile.ZipFile(memzip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for td, grp in df.groupby("td_id"):
-                values = grp["berth_id"].astype(str)
-                if unique_only:
-                    values = pd.Index(values).unique()
-                    values = sorted(values)
-                content = "\n".join(values) + "\n" if len(values) else ""
-                fname = f"{_sanitize_filename(str(td))}.txt"
-                zf.writestr(fname, content)
-
-        memzip.seek(0)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        zipname = f"dvs_producer_{ts}.zip"
-
-        st.download_button(
-            "⬇️ ดาวน์โหลดไฟล์ .zip (รวม .txt แยกตาม td_id)",
-            data=memzip,
-            file_name=zipname,
-            mime="application/zip",
-            use_container_width=True
-        )
+        # ดาวน์โหลดทีละไฟล์ .txt ต่อ td_id (ไม่รวม zip)
+        st.subheader("⬇️ ดาวน์โหลดไฟล์ .txt ต่อ td_id")
+        counts = []
+        for td, grp in df.groupby("td_id"):
+            values = grp["berth_id"].astype(str)
+            count = len(values)
+            if unique_only:
+                values = pd.Index(values).unique()
+                values = sorted(values)
+                count = len(values)
+            content = "\n".join(values) + ("\n" if len(values) else "")
+            data = content.encode("utf-8")
+            fname = f"{_sanitize_filename(str(td))}.txt"
+            st.download_button(
+                label=f"ดาวน์โหลด {fname} ({count} รายการ)",
+                data=data,
+                file_name=fname,
+                mime="text/plain",
+                use_container_width=True,
+                key=f"dl_{fname}"
+            )
+            counts.append({"td_id": td, "count": count})
 
         # สรุปนับจำนวนต่อ td_id
-        counts = df.groupby("td_id")["berth_id"].nunique() if unique_only else df.groupby("td_id")["berth_id"].size()
-        st.subheader("📦 สรุปจำนวนรายการต่อ td_id")
-        st.dataframe(counts.rename("count").reset_index(), use_container_width=True)
+        if counts:
+            st.subheader("📦 สรุปจำนวนรายการต่อ td_id")
+            st.dataframe(pd.DataFrame(counts).sort_values('td_id').reset_index(drop=True), use_container_width=True)
 
 
 # ============== ROUTING ==============

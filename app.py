@@ -3,6 +3,7 @@ import pandas as pd
 import re
 from io import BytesIO
 from datetime import datetime
+import zipfile
 
 # ============== PAGE CONFIG ==============
 st.set_page_config(page_title="DVS Tools", page_icon="🧭", layout="wide")
@@ -222,7 +223,7 @@ def render_checker():
         st.caption("Tips: เตรียมลิสต์สเปกของแต่ละ td ไว้ล่วงหน้าแล้ว copy/paste ลงช่องของ td นั้น ๆ")
 
 
-# ============== DVS PRODUCER (หลายไฟล์ + ไม่รวม zip + ตัดคอมเมนต์) ==============
+# ============== DVS PRODUCER (หลายไฟล์ + เลือกดาวน์โหลดหลายไฟล์พร้อมกัน) ==============
 def render_producer():
     st.button("← กลับหน้าแรก", on_click=_back_to_home)
     st.title("DVS Producer")
@@ -253,33 +254,59 @@ def render_producer():
             st.error("ไม่พบข้อมูลในไฟล์ .dna")
             st.stop()
 
-        # ดาวน์โหลดทีละไฟล์ .txt ต่อ td_id (ไม่รวม zip)
-        st.subheader("⬇️ ดาวน์โหลดไฟล์ .txt ต่อ td_id")
-        counts = []
+        # เตรียมข้อมูลต่อ td_id
+        td_files = []
         for td, grp in df.groupby("td_id"):
             values = grp["berth_id"].astype(str)
-            count = len(values)
             if unique_only:
                 values = pd.Index(values).unique()
                 values = sorted(values)
-                count = len(values)
             content = "\n".join(values) + ("\n" if len(values) else "")
             data = content.encode("utf-8")
             fname = f"{_sanitize_filename(str(td))}.txt"
+            td_files.append({"td_id": str(td), "file_name": fname, "data": data, "count": len(values)})
+
+        # แสดงตารางสรุป
+        st.subheader("📦 สรุปจำนวนรายการต่อ td_id")
+        st.dataframe(pd.DataFrame([{"td_id": x["td_id"], "count": x["count"]} for x in td_files]).sort_values("td_id").reset_index(drop=True), use_container_width=True)
+
+        # ดาวน์โหลดทีละไฟล์ (คงไว้)
+        st.subheader("⬇️ ดาวน์โหลดรายไฟล์ (ทีละไฟล์)")
+        for i, item in enumerate(td_files):
             st.download_button(
-                label=f"ดาวน์โหลด {fname} ({count} รายการ)",
-                data=data,
-                file_name=fname,
+                label=f"ดาวน์โหลด {item['file_name']} ({item['count']} รายการ)",
+                data=item["data"],
+                file_name=item["file_name"],
                 mime="text/plain",
                 use_container_width=True,
-                key=f"dl_{fname}"
+                key=f"dl_single_{i}"
             )
-            counts.append({"td_id": td, "count": count})
 
-        # สรุปนับจำนวนต่อ td_id
-        if counts:
-            st.subheader("📦 สรุปจำนวนรายการต่อ td_id")
-            st.dataframe(pd.DataFrame(counts).sort_values('td_id').reset_index(drop=True), use_container_width=True)
+        # เลือกหลายไฟล์แล้วดาวน์โหลดเป็น .zip เดียว
+        st.subheader("📥 เลือกหลายไฟล์แล้วดาวน์โหลดพร้อมกัน (.zip)")
+        options = [item["file_name"] for item in td_files]
+        default_select_all = st.checkbox("เลือกทั้งหมด", value=False)
+        selected = st.multiselect("เลือกไฟล์ที่ต้องการรวม", options=options, default=options if default_select_all else [])
+
+        if st.button("⬇️ ดาวน์โหลดไฟล์ที่เลือก (ZIP)", use_container_width=True):
+            if not selected:
+                st.warning("กรุณาเลือกไฟล์อย่างน้อย 1 ไฟล์")
+            else:
+                memzip = BytesIO()
+                with zipfile.ZipFile(memzip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    for item in td_files:
+                        if item["file_name"] in selected:
+                            zf.writestr(item["file_name"], item["data"])
+                memzip.seek(0)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                st.download_button(
+                    label="⬇️ ดาวน์โหลด ZIP ที่เลือก",
+                    data=memzip,
+                    file_name=f"dvs_selected_{ts}.zip",
+                    mime="application/zip",
+                    use_container_width=True,
+                    key="dl_zip_selected"
+                )
 
 
 # ============== ROUTING ==============

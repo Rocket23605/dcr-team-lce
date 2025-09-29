@@ -223,7 +223,7 @@ def render_checker():
         st.caption("Tips: เตรียมลิสต์สเปกของแต่ละ td ไว้ล่วงหน้าแล้ว copy/paste ลงช่องของ td นั้น ๆ")
 
 
-# ============== DVS PRODUCER (หลายไฟล์ + เลือกดาวน์โหลดหลายไฟล์พร้อมกัน) ==============
+# ============== DVS PRODUCER (หลายไฟล์ + Checkbox เลือกไฟล์ + ZIP เดียว) ==============
 def render_producer():
     st.button("← กลับหน้าแรก", on_click=_back_to_home)
     st.title("DVS Producer")
@@ -266,47 +266,57 @@ def render_producer():
             fname = f"{_sanitize_filename(str(td))}.txt"
             td_files.append({"td_id": str(td), "file_name": fname, "data": data, "count": len(values)})
 
-        # แสดงตารางสรุป
+        # แสดงสรุป
         st.subheader("📦 สรุปจำนวนรายการต่อ td_id")
         st.dataframe(pd.DataFrame([{"td_id": x["td_id"], "count": x["count"]} for x in td_files]).sort_values("td_id").reset_index(drop=True), use_container_width=True)
 
-        # ดาวน์โหลดทีละไฟล์ (คงไว้)
-        st.subheader("⬇️ ดาวน์โหลดรายไฟล์ (ทีละไฟล์)")
-        for i, item in enumerate(td_files):
+        # ======= UI แบบ Compact: Checkbox ต่อไฟล์ + ปุ่มเดียวโหลด ZIP =======
+        st.subheader("🗂️ เลือกไฟล์ที่จะดาวน์โหลด")
+        # เตรียม state สำหรับ checkbox
+        keys = [f"sel_{item['file_name']}" for item in td_files]
+        for k in keys:
+            if k not in st.session_state:
+                st.session_state[k] = False
+
+        colA, colB, colC = st.columns([1,1,2])
+        with colA:
+            if st.button("เลือกทั้งหมด"):
+                for k in keys:
+                    st.session_state[k] = True
+                st.rerun()
+        with colB:
+            if st.button("ล้างการเลือก"):
+                for k in keys:
+                    st.session_state[k] = False
+                st.rerun()
+
+        # แสดง checkbox แบบ 2 คอลัมน์ ประหยัดพื้นที่
+        cols = st.columns(2)
+        for i, item in enumerate(sorted(td_files, key=lambda x: x["td_id"])):
+            with cols[i % 2]:
+                st.checkbox(f"{item['file_name']} ({item['count']} รายการ)", key=f"sel_{item['file_name']}")
+
+        # ปุ่มดาวน์โหลด ZIP จากไฟล์ที่เลือก
+        selected = [it for it in td_files if st.session_state.get(f"sel_{it['file_name']}", False)]
+        disabled = len(selected) == 0
+        zip_label = "⬇️ ดาวน์โหลดไฟล์ที่เลือก (ZIP)"
+        if disabled:
+            st.info("กรุณาเลือกไฟล์อย่างน้อย 1 รายการ จากรายการด้านบน")
+        if st.button(zip_label, use_container_width=True, disabled=disabled):
+            memzip = BytesIO()
+            with zipfile.ZipFile(memzip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for it in selected:
+                    zf.writestr(it["file_name"], it["data"])
+            memzip.seek(0)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             st.download_button(
-                label=f"ดาวน์โหลด {item['file_name']} ({item['count']} รายการ)",
-                data=item["data"],
-                file_name=item["file_name"],
-                mime="text/plain",
+                label="⬇️ ดาวน์โหลด ZIP",
+                data=memzip,
+                file_name=f"dvs_selected_{ts}.zip",
+                mime="application/zip",
                 use_container_width=True,
-                key=f"dl_single_{i}"
+                key="dl_zip_selected"
             )
-
-        # เลือกหลายไฟล์แล้วดาวน์โหลดเป็น .zip เดียว
-        st.subheader("📥 เลือกหลายไฟล์แล้วดาวน์โหลดพร้อมกัน (.zip)")
-        options = [item["file_name"] for item in td_files]
-        default_select_all = st.checkbox("เลือกทั้งหมด", value=False)
-        selected = st.multiselect("เลือกไฟล์ที่ต้องการรวม", options=options, default=options if default_select_all else [])
-
-        if st.button("⬇️ ดาวน์โหลดไฟล์ที่เลือก (ZIP)", use_container_width=True):
-            if not selected:
-                st.warning("กรุณาเลือกไฟล์อย่างน้อย 1 ไฟล์")
-            else:
-                memzip = BytesIO()
-                with zipfile.ZipFile(memzip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-                    for item in td_files:
-                        if item["file_name"] in selected:
-                            zf.writestr(item["file_name"], item["data"])
-                memzip.seek(0)
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                st.download_button(
-                    label="⬇️ ดาวน์โหลด ZIP ที่เลือก",
-                    data=memzip,
-                    file_name=f"dvs_selected_{ts}.zip",
-                    mime="application/zip",
-                    use_container_width=True,
-                    key="dl_zip_selected"
-                )
 
 
 # ============== ROUTING ==============

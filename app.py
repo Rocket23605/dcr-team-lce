@@ -2,13 +2,13 @@ import streamlit as st
 import pandas as pd
 import re
 from io import BytesIO
+from datetime import datetime
+import zipfile
 
-# ---------- Page config ----------
-st.set_page_config(page_title="TD Checker v3 (Manual)", page_icon="✅", layout="wide")
-st.title("TD Checker v3 • เปรียบเทียบ berth_id ด้วยรายการอ้างอิงที่วางเอง (Manual paste)")
-st.caption("อัปโหลดไฟล์ .dna (หลายไฟล์ได้) + กำหนด td_id และวางลิสต์ berth_id ต่อ td แล้วกดสร้างรายงาน")
+# ============== PAGE CONFIG ==============
+st.set_page_config(page_title="DVS Tools", page_icon="🧭", layout="wide")
 
-# ---------- Helpers ----------
+# ============== HELPERS (shared) ==============
 def parse_dna_file(file) -> pd.DataFrame:
     """อ่านไฟล์ .dna แล้วดึงคู่ (berth_id, td_id) ออกมา
     - ข้ามเฉพาะบรรทัดคอมเมนต์ที่ขึ้นต้นด้วย //
@@ -55,7 +55,7 @@ def parse_dna_file(file) -> pd.DataFrame:
         berth_id = toks[0]
         td_id    = toks[-1]
 
-        # ถ้า berth_id เป็นคอมเมนต์หลังการตัดแล้ว จะถูกข้ามอยู่ดี
+        # เผื่อกรณีมีเศษคอมเมนต์โผล่มาเป็นคอลัมน์แรก
         if str(berth_id).startswith("//"):
             continue
 
@@ -84,113 +84,212 @@ def compare_sets(name: str, dna_set: set, ref_set: set) -> pd.DataFrame:
     return pd.DataFrame(parts, columns=["td_id", "status", "berth_id"])
 
 
-# ---------- Inputs ----------
-dna_files = st.file_uploader("อัปโหลดไฟล์ .dna (ไม่จำกัดจำนวน)", type=["dna", "txt"], accept_multiple_files=True)
+def _sanitize_filename(name: str) -> str:
+    safe = re.sub(r"[^0-9A-Za-z._-]+", "_", name.strip())
+    return safe or "TD"
 
-td_input = st.text_input("ใส่รายการ td_id (คั่นด้วยช่องว่าง)", value="Y1 YE FE DR").strip()
-td_list = [t for t in td_input.split() if t]
 
-st.markdown("### วางรายการอ้างอิงของแต่ละ td (คั่นด้วย space / comma / newline)")
-manual_map = {}
-cols = st.columns(2)
-for i, td in enumerate(td_list):
-    with cols[i % 2]:
-        manual_map[td] = st.text_area(
-            f"{td} • วาง `berth_id` ที่เป็นสเปก",
-            key=f"ta_{td}",
-            height=120,
-            placeholder="ตัวอย่าง: A101, A102, A103 หรือพิมพ์เรียงกันเว้นวรรค/บรรทัด"
+def _back_to_home():
+    st.session_state.page = "home"
+    st.rerun()
+
+
+# ============== HOMEPAGE ==============
+def render_home():
+    st.title("DVS Tools • Homepage")
+    st.write("เลือกเครื่องมือที่ต้องการใช้งาน")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🏭 DVS Producer (Berth sorter)", use_container_width=True):
+            st.session_state.page = "producer"
+            st.rerun()
+    with c2:
+        if st.button("🧪 DVS Checker", use_container_width=True):
+            st.session_state.page = "checker"
+            st.rerun()
+
+    st.caption("DVS Producer: อัปโหลดไฟล์ berth.dna แล้วระบบจะแยกเป็นไฟล์ .txt ต่อ td_id\n"
+               "DVS Checker: เทียบรายการ berth_id ตามสเปกของแต่ละ td (เหมือนแอปเดิม)")
+
+
+# ============== DVS CHECKER (ตามแอปเดิม) ==============
+def render_checker():
+    st.button("← กลับหน้าแรก", on_click=_back_to_home)
+    st.title("DVS Checker • เปรียบเทียบ berth_id ด้วยรายการอ้างอิง (Manual paste)")
+
+    dna_files = st.file_uploader("อัปโหลดไฟล์ .dna (ไม่จำกัดจำนวน)", type=["dna", "txt"], accept_multiple_files=True)
+    td_input = st.text_input("ใส่รายการ td_id (คั่นด้วยช่องว่าง)", value="Y1 YE FE DR").strip()
+    td_list = [t for t in td_input.split() if t]
+
+    st.markdown("### วางรายการอ้างอิงของแต่ละ td (คั่นด้วย space / comma / newline)")
+    manual_map = {}
+    cols = st.columns(2)
+    for i, td in enumerate(td_list):
+        with cols[i % 2]:
+            manual_map[td] = st.text_area(
+                f"{td} • วาง `berth_id` ที่เป็นสเปก",
+                key=f"ta_{td}",
+                height=120,
+                placeholder="ตัวอย่าง: A101, A102, A103 หรือพิมพ์เรียงกันเว้นวรรค/บรรทัด"
+            )
+
+    run_btn = st.button("🔎 สร้างรายงาน")
+
+    if run_btn:
+        if not dna_files:
+            st.error("กรุณาอัปโหลดไฟล์ .dna อย่างน้อย 1 ไฟล์")
+            st.stop()
+
+        # รวมข้อมูลจากทุกไฟล์ .dna
+        frames = []
+        for f in dna_files:
+            try:
+                frames.append(parse_dna_file(f))
+            except Exception as e:
+                st.error(f"อ่านไฟล์ล้มเหลว: {f.name} ({e})")
+        if not frames:
+            st.error("ไม่พบข้อมูลในไฟล์ .dna ที่อัปโหลด")
+            st.stop()
+
+        df_all = pd.concat(frames, ignore_index=True)
+
+        # เตรียมเปรียบเทียบ
+        summary_rows = []
+        per_td_results = {}
+        warn_empty = []
+
+        for td in td_list:
+            dna_ids = set(df_all.loc[df_all["td_id"] == td, "berth_id"].astype(str))
+            ref_ids = parse_manual_list(manual_map.get(td, ""))
+
+            if len(ref_ids) == 0:
+                warn_empty.append(td)
+
+            result_df = compare_sets(td, dna_ids, ref_ids)
+            per_td_results[td] = result_df
+
+            n_miss  = (result_df["status"] == "MISSING_IN_DNA").sum()
+            n_extra = (result_df["status"] == "EXTRA_IN_DNA").sum()
+            n_match = (result_df["status"] == "MATCHED").sum()
+
+            summary_rows.append({
+                "td_id": td,
+                "ref_count": len(ref_ids),
+                "dna_count": len(dna_ids),
+                "matched": n_match,
+                "missing_in_dna": n_miss,
+                "extra_in_dna": n_extra
+            })
+
+        if warn_empty:
+            st.warning("td ต่อไปนี้ยังไม่ได้วางรายการอ้างอิง: " + ", ".join(warn_empty))
+
+        summary = pd.DataFrame(summary_rows)
+        st.subheader("📊 SUMMARY")
+        st.dataframe(summary, use_container_width=True)
+
+        # แสดงผลต่างแบบทันที
+        st.subheader("🔎 รายการที่แตกต่าง (ต่อ td_id)")
+        for td, dfres in per_td_results.items():
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(f"**{td} — MISSING_IN_DNA** (อยู่ในอ้างอิง แต่ไม่อยู่ใน .dna)")
+                st.dataframe(
+                    dfres.loc[dfres["status"] == "MISSING_IN_DNA", ["berth_id"]],
+                    use_container_width=True, height=240
+                )
+            with col2:
+                st.markdown(f"**{td} — EXTRA_IN_DNA** (อยู่ใน .dna แต่ไม่อยู่ในอ้างอิง)")
+                st.dataframe(
+                    dfres.loc[dfres["status"] == "EXTRA_IN_DNA", ["berth_id"]],
+                    use_container_width=True, height=240
+                )
+
+        # สร้างไฟล์ Excel ให้ดาวน์โหลด
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            summary.to_excel(writer, sheet_name="SUMMARY", index=False)
+            for td, dfres in per_td_results.items():
+                sheet = td[:31] if td else "TD"
+                dfres.to_excel(writer, sheet_name=sheet, index=False)
+        output.seek(0)
+
+        st.download_button(
+            label="⬇️ ดาวน์โหลดรายงาน Excel",
+            data=output,
+            file_name="td_compare_report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-run_btn = st.button("🔎 สร้างรายงาน")
+        st.success("สร้างรายงานสำเร็จ")
+        st.caption("Tips: เตรียมลิสต์สเปกของแต่ละ td ไว้ล่วงหน้าแล้ว copy/paste ลงช่องของ td นั้น ๆ")
 
 
-# ---------- Processing ----------
-if run_btn:
-    if not dna_files:
-        st.error("กรุณาอัปโหลดไฟล์ .dna อย่างน้อย 1 ไฟล์")
-        st.stop()
+# ============== DVS PRODUCER (แยกไฟล์ .txt ต่อ td_id) ==============
+def render_producer():
+    st.button("← กลับหน้าแรก", on_click=_back_to_home)
+    st.title("DVS Producer • สร้างไฟล์ .txt ต่อ td_id จากไฟล์ berth.dna")
 
-    # รวมข้อมูลจากทุกไฟล์ .dna
-    frames = []
-    for f in dna_files:
+    dna_file = st.file_uploader("อัปโหลดไฟล์ berth.dna", type=["dna", "txt"], accept_multiple_files=False)
+    unique_only = st.checkbox("ลบซ้ำและเรียงค่า (recommended)", value=True)
+    produce = st.button("🏁 Produce")
+
+    if produce:
+        if dna_file is None:
+            st.error("กรุณาอัปโหลดไฟล์ .dna ก่อนกด Produce")
+            st.stop()
+
+        # สร้าง DataFrame จากไฟล์เดียว
         try:
-            frames.append(parse_dna_file(f))
+            df = parse_dna_file(dna_file)
         except Exception as e:
-            st.error(f"อ่านไฟล์ล้มเหลว: {f.name} ({e})")
-    if not frames:
-        st.error("ไม่พบข้อมูลในไฟล์ .dna ที่อัปโหลด")
-        st.stop()
+            st.error(f"อ่านไฟล์ล้มเหลว: {getattr(dna_file, 'name', 'berth.dna')} ({e})")
+            st.stop()
 
-    df_all = pd.concat(frames, ignore_index=True)
+        if df.empty:
+            st.error("ไม่พบข้อมูลในไฟล์ .dna")
+            st.stop()
 
-    # เตรียมเปรียบเทียบ
-    summary_rows = []
-    per_td_results = {}
-    warn_empty = []
+        # จัดเตรียมไฟล์ .txt ต่อ td_id → รวมเป็น zip ให้ดาวน์โหลด
+        memzip = BytesIO()
+        with zipfile.ZipFile(memzip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for td, grp in df.groupby("td_id"):
+                values = grp["berth_id"].astype(str)
+                if unique_only:
+                    values = pd.Index(values).unique()
+                    values = sorted(values)
+                content = "\n".join(values) + "\n" if len(values) else ""
+                fname = f"{_sanitize_filename(str(td))}.txt"
+                zf.writestr(fname, content)
 
-    for td in td_list:
-        dna_ids = set(df_all.loc[df_all["td_id"] == td, "berth_id"].astype(str))
-        ref_ids = parse_manual_list(manual_map.get(td, ""))
+        memzip.seek(0)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        zipname = f"dvs_producer_{ts}.zip"
 
-        if len(ref_ids) == 0:
-            warn_empty.append(td)
+        st.download_button(
+            "⬇️ ดาวน์โหลดไฟล์ .zip (รวม .txt แยกตาม td_id)",
+            data=memzip,
+            file_name=zipname,
+            mime="application/zip",
+            use_container_width=True
+        )
 
-        result_df = compare_sets(td, dna_ids, ref_ids)
-        per_td_results[td] = result_df
+        # สรุปนับจำนวนต่อ td_id
+        counts = df.groupby("td_id")["berth_id"].nunique() if unique_only else df.groupby("td_id")["berth_id"].size()
+        st.subheader("📦 สรุปจำนวนรายการต่อ td_id")
+        st.dataframe(counts.rename("count").reset_index(), use_container_width=True)
 
-        n_miss  = (result_df["status"] == "MISSING_IN_DNA").sum()
-        n_extra = (result_df["status"] == "EXTRA_IN_DNA").sum()
-        n_match = (result_df["status"] == "MATCHED").sum()
 
-        summary_rows.append({
-            "td_id": td,
-            "ref_count": len(ref_ids),
-            "dna_count": len(dna_ids),
-            "matched": n_match,
-            "missing_in_dna": n_miss,
-            "extra_in_dna": n_extra
-        })
+# ============== ROUTING ==============
+if "page" not in st.session_state:
+    st.session_state.page = "home"
 
-    if warn_empty:
-        st.warning("td ต่อไปนี้ยังไม่ได้วางรายการอ้างอิง: " + ", ".join(warn_empty))
-
-    summary = pd.DataFrame(summary_rows)
-    st.subheader("📊 SUMMARY")
-    st.dataframe(summary, use_container_width=True)
-
-    # แสดงผลต่างแบบทันที
-    st.subheader("🔎 รายการที่แตกต่าง (ต่อ td_id)")
-    for td, dfres in per_td_results.items():
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown(f"**{td} — MISSING_IN_DNA** (อยู่ในอ้างอิง แต่ไม่อยู่ใน .dna)")
-            st.dataframe(
-                dfres.loc[dfres["status"] == "MISSING_IN_DNA", ["berth_id"]],
-                use_container_width=True, height=240
-            )
-        with col2:
-            st.markdown(f"**{td} — EXTRA_IN_DNA** (อยู่ใน .dna แต่ไม่อยู่ในอ้างอิง)")
-            st.dataframe(
-                dfres.loc[dfres["status"] == "EXTRA_IN_DNA", ["berth_id"]],
-                use_container_width=True, height=240
-            )
-
-    # สร้างไฟล์ Excel ให้ดาวน์โหลด
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        summary.to_excel(writer, sheet_name="SUMMARY", index=False)
-        for td, dfres in per_td_results.items():
-            sheet = td[:31] if td else "TD"
-            dfres.to_excel(writer, sheet_name=sheet, index=False)
-    output.seek(0)
-
-    st.download_button(
-        label="⬇️ ดาวน์โหลดรายงาน Excel",
-        data=output,
-        file_name="td_compare_report.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
-    st.success("สร้างรายงานสำเร็จ")
-    st.caption("Tips: ถ้าต้องการให้ทีมใช้งานเร็ว ให้เตรียมลิสต์สเปกของแต่ละ td ไว้ล่วงหน้าแล้ว copy/paste ลงช่องของ td นั้น ๆ")
+if st.session_state.page == "home":
+    render_home()
+elif st.session_state.page == "checker":
+    render_checker()
+elif st.session_state.page == "producer":
+    render_producer()
+else:
+    render_home()
